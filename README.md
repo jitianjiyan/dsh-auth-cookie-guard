@@ -22,7 +22,7 @@
 | 层 | 行为 | 默认值 |
 | --- | --- | --- |
 | 头部预算 | 在 `webServer` 服务就绪后把 `server.maxHeaderSize` 提升到 64 KiB | `maxHeaderBytes: 65536` |
-| 退休旧 cookie | 每个请求检查 `Cookie` 头里的 `dsh-auth-<43 位 base64url>`；解析 cookie 值里的 `issuedAt`，只保留最新 `keep` 条 + 当前端口那一条，其余用 `Max-Age=0; Path=/` 从浏览器 jar 删除 | `keep: 4` |
+| 退休旧 cookie | 每个请求检查 `Cookie` 头里的 `dsh-auth-<43 位 base64url>`；解析 cookie 值里的 `issuedAt`，只保留最新 `keep` 条 + 当前端口那一条，其余用 `Max-Age=0; Path=/` 从浏览器 jar 删除（每个响应最多 96 条，约 12 KiB） | `keep: 4` |
 
 几点设计取舍：
 
@@ -32,6 +32,7 @@
 - **为什么用 `Max-Age=0` 而不是改名或重写**：cookie 名与端口/协议绑定（`requestAudience`），改名会让认证查不到；重签名需要密钥。删除是唯一不改变语义的收敛方式。
 - **对异常格式零影响**：只匹配 `dsh-auth-` + 43 位 base64url 的精确形状。若未来 cookie 格式变化，退化结果是「预算提升、不再清理」，而不是破坏会话。
 - **不会越界**：只处理 `webServer` 自己的局域网/本机监听器；其它 profile 的 host 有独立 cookie 库，互不影响。
+- **为什么单响应最多删 96 条**：删除行长度由固定名字形状决定（约 125 字节/条），96 条约 12 KiB，留在 Node HTTP 客户端默认 16 KiB 响应头预算之内——实测 128 条（约 16 KiB）会让 `fetch` 解码握手直接失败。更大的 jar 不会丢清理，只是在后续请求里分批删完，绝不会用一条超大的响应头去赌客户端容忍度。
 - **64 KiB 为什么够**：Chromium 对单域名有条数上限（180 条），每条 minted cookie 约 173 字符，理论上限约 33 KB，已经落在 64 KiB 之内。即使一个已经被锁死的 jar 条数拉满，也能在第一次握手时被放行，并当场收敛。
 
 ## 配置
@@ -83,7 +84,7 @@ big header 20KB:  {"status":401}            # 提升预算前这里是 431
 `auth-cookie-guard: listener header budget 65536 bytes, keeping 4 launch cookie(s)` 与
 `auth-cookie-guard: retired N launch cookie(s), kept 4`，此后无论重启多少次都不再累积。
 
-回归测试 `npm test`（`test/handshake.test.js`）覆盖 303 对象写头（真实握手路径）、普通 200 与三参数写头，断言删除指令和握手新 cookie 在同一个响应里返回——旧实现只在握手之后的普通请求里补清理。
+回归测试 `npm test`（`test/handshake.test.js`，共 11 例）覆盖：303 对象写头（真实握手路径）、隐式 200、三参数写头、平铺数组写头、`appendHeader` 多值、无清理时不包装 `writeHead`、64 KiB 预算下 200 条 cookie（约 19 KiB）仍能握手、400 条 jar 分 5 轮各 ≤96 条收敛且客户端不报错——旧实现会在 303 上丢掉全部删除指令，128 条的上限也会让 `fetch` 解码失败。
 
 ## 环境
 

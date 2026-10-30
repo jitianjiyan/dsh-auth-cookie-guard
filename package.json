@@ -1,6 +1,6 @@
 {
   "name": "dsh-auth-cookie-guard",
-  "version": "1.0.1",
+  "version": "1.0.2",
   "description": "Give the local listener a header budget large enough for its own launch cookies, and retire the cookies of every earlier start, so the desktop welcome handshake cannot lock a profile out after ~72 restarts.",
   "type": "module",
   "main": "index.js",

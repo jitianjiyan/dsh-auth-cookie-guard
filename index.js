@@ -77,8 +77,17 @@ const LIMITS = {
 /** Attributes that delete a cookie for its exact host and path. */
 const EXPIRATION = 'Max-Age=0; Path=/; Expires=Thu, 01 Jan 1970 00:00:00 GMT'
 
-/** Cap per response so a huge jar cannot produce an unbounded reply. */
-const MAX_RETIRE_PER_RESPONSE = 128
+/**
+ * Cap per response so a huge jar cannot produce an unbounded reply.
+ *
+ * `dsh-auth-` plus 43 digest characters is the only name shape accepted, so
+ * one deletion line is ~125 bytes on the wire; 96 of them stay near 12 KiB.
+ * That clears the 16 KiB default response-header budget of Node HTTP clients
+ * (a 128-line reply made `fetch` fail to decode the handshake) and is far
+ * below what browsers accept. A jar larger than this drains across later
+ * requests instead of risking one oversized response.
+ */
+const MAX_RETIRE_PER_RESPONSE = 96
 
 /**
  * Guard the local listener.
@@ -276,16 +285,12 @@ function armCookies(res, lines) {
       headers = [...headers, ...pending.flatMap((line) => ['set-cookie', line])]
     } else if (headers !== undefined && headers !== null) {
       const copy = {}
-      let replaced = false
+      const cookies = []
       for (const key of Object.keys(headers)) {
-        if (key.toLowerCase() === 'set-cookie') {
-          copy['set-cookie'] = [...cookieValues(headers[key]), ...pending]
-          replaced = true
-        } else {
-          copy[key] = headers[key]
-        }
+        if (key.toLowerCase() === 'set-cookie') cookies.push(...cookieValues(headers[key]))
+        else copy[key] = headers[key]
       }
-      if (!replaced) copy['set-cookie'] = [...pending]
+      copy['set-cookie'] = [...cookies, ...pending]
       headers = copy
     } else {
       res.setHeader('set-cookie', [...cookieValues(res.getHeader('set-cookie')), ...pending])

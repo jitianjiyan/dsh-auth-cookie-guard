@@ -116,3 +116,138 @@ test('three-argument writeHead keeps the deletions', async () => {
     await server.close()
   }
 })
+
+test('flat-array writeHead keeps the deletions and its own headers', async () => {
+  const server = await guarded((req, res) => {
+    res.writeHead(303, ['location', './', 'set-cookie', 'dsh-auth-new=1; Path=/'])
+    res.end()
+  })
+  try {
+    const response = await fetch(`${server.origin}/?token=launch-token`, {
+      headers: { cookie: jar(100) },
+      redirect: 'manual',
+    })
+    assert.equal(response.status, 303)
+    assert.equal(response.headers.get('location'), './')
+    const lines = response.headers.getSetCookie()
+    assert.equal(lines.filter((line) => line.startsWith('dsh-auth-new=')).length, 1)
+    assertRetired(lines, 1)
+  } finally {
+    await server.close()
+  }
+})
+
+test('three-argument array writeHead keeps the deletions', async () => {
+  const server = await guarded((req, res) => {
+    res.writeHead(200, 'OK', ['set-cookie', 'dsh-auth-new=1; Path=/'])
+    res.end('ok')
+  })
+  try {
+    assertRetired(await handshake(server.origin), 1)
+  } finally {
+    await server.close()
+  }
+})
+
+test('appendHeader values survive the implicit writeHead', async () => {
+  const server = await guarded((req, res) => {
+    res.appendHeader('set-cookie', 'dsh-auth-one=1; Path=/')
+    res.appendHeader('set-cookie', 'dsh-auth-two=2; Path=/')
+    res.end('ok')
+  })
+  try {
+    const lines = await handshake(server.origin)
+    assert.equal(lines.filter((line) => line.startsWith('dsh-auth-one=')).length, 1)
+    assert.equal(lines.filter((line) => line.startsWith('dsh-auth-two=')).length, 1)
+    assertRetired(lines, 2)
+  } finally {
+    await server.close()
+  }
+})
+
+test('a request with nothing to retire leaves writeHead untouched', async () => {
+  let untouched = false
+  const server = await guarded((req, res) => {
+    untouched = res.writeHead === Object.getPrototypeOf(res).writeHead
+    res.end('ok')
+  })
+  try {
+    const response = await fetch(server.origin, { headers: { cookie: jar(4) } })
+    await response.text()
+    assert.equal(untouched, true)
+  } finally {
+    await server.close()
+  }
+})
+
+test('the current authority cookie survives even when it is the oldest', async () => {
+  const server = await guarded((req, res) => {
+    res.writeHead(303, { location: './', 'set-cookie': 'dsh-auth-new=1; Path=/' })
+    res.end()
+  })
+  try {
+    const currentName = 'dsh-auth-' + createHash('sha256').update(new URL(server.origin).host).digest('base64url')
+    const payload = Buffer.from(JSON.stringify({ issuedAt: 0 })).toString('base64url')
+    const response = await fetch(`${server.origin}/?token=launch-token`, {
+      headers: { cookie: `${currentName}=v1.${payload}.signature; ${jar(100)}` },
+      redirect: 'manual',
+    })
+    const deletions = response.headers.getSetCookie().filter((line) => line.includes('Max-Age=0'))
+    assert.equal(deletions.length, 96)
+    assert.ok(!deletions.some((line) => line.startsWith(`${currentName}=`)), 'the current authority cookie was deleted')
+  } finally {
+    await server.close()
+  }
+})
+
+test('the raised budget admits a cookie header larger than Node default', async () => {
+  const server = await guarded((req, res) => {
+    res.writeHead(303, { location: './', 'set-cookie': 'dsh-auth-new=1; Path=/' })
+    res.end()
+  })
+  try {
+    const response = await fetch(`${server.origin}/?token=launch-token`, {
+      headers: { cookie: jar(200) },
+      redirect: 'manual',
+    })
+    const deletions = response.headers.getSetCookie().filter((line) => line.includes('Max-Age=0'))
+    assert.equal(response.status, 303)
+    assert.equal(deletions.length, 96)
+  } finally {
+    await server.close()
+  }
+})
+
+test('a 400-cookie jar drains in bounded chunks without breaking the client', async () => {
+  const server = await guarded((req, res) => {
+    res.writeHead(303, { location: './', 'set-cookie': 'dsh-auth-new=1; Path=/' })
+    res.end()
+  })
+  try {
+    let entries = Array.from({ length: 400 }, (_, index) => {
+      const { name, value } = mintedCookie(index)
+      return `${name}=${value}`
+    })
+    let rounds = 0
+    while (entries.length > 4) {
+      const response = await fetch(`${server.origin}/?token=launch-token`, {
+        headers: { cookie: entries.join('; ') },
+        redirect: 'manual',
+      })
+      assert.equal(response.status, 303)
+      const deletions = response.headers.getSetCookie().filter((line) => line.includes('Max-Age=0'))
+      assert.ok(deletions.length > 0 && deletions.length <= 96, `round ${String(rounds)}: ${String(deletions.length)} deletions`)
+      // Apply the deletions the way the browser would before the next request.
+      for (const line of deletions) {
+        const name = line.slice(0, line.indexOf('='))
+        entries = entries.filter((entry) => !entry.startsWith(`${name}=`))
+      }
+      rounds += 1
+      assert.ok(rounds <= 6, `took ${String(rounds)} rounds`)
+    }
+    assert.equal(rounds, 5)
+    assert.equal(entries.length, 4)
+  } finally {
+    await server.close()
+  }
+})
