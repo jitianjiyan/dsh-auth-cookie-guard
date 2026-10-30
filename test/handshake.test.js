@@ -117,6 +117,25 @@ test('three-argument writeHead keeps the deletions', async () => {
   }
 })
 
+test('object writeHead folds case-variant set-cookie keys and array values', async () => {
+  const server = await guarded((req, res) => {
+    res.writeHead(303, {
+      'Set-Cookie': ['dsh-auth-one=1; Path=/'],
+      'set-cookie': 'dsh-auth-two=2; Path=/',
+      location: './',
+    })
+    res.end()
+  })
+  try {
+    const lines = await handshake(server.origin)
+    assert.equal(lines.filter((line) => line.startsWith('dsh-auth-one=')).length, 1)
+    assert.equal(lines.filter((line) => line.startsWith('dsh-auth-two=')).length, 1)
+    assertRetired(lines, 2)
+  } finally {
+    await server.close()
+  }
+})
+
 test('flat-array writeHead keeps the deletions and its own headers', async () => {
   const server = await guarded((req, res) => {
     res.writeHead(303, ['location', './', 'set-cookie', 'dsh-auth-new=1; Path=/'])

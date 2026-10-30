@@ -84,7 +84,7 @@ big header 20KB:  {"status":401}            # 提升预算前这里是 431
 `auth-cookie-guard: listener header budget 65536 bytes, keeping 4 launch cookie(s)` 与
 `auth-cookie-guard: retired N launch cookie(s), kept 4`，此后无论重启多少次都不再累积。
 
-回归测试 `npm test`（`test/handshake.test.js`，共 11 例）覆盖：303 对象写头（真实握手路径）、隐式 200、三参数写头、平铺数组写头、`appendHeader` 多值、无清理时不包装 `writeHead`、64 KiB 预算下 200 条 cookie（约 19 KiB）仍能握手、400 条 jar 分 5 轮各 ≤96 条收敛且客户端不报错——旧实现会在 303 上丢掉全部删除指令，128 条的上限也会让 `fetch` 解码失败。
+回归测试 `npm test`（`test/handshake.test.js`，共 12 例）覆盖：303 对象写头（真实握手路径）、隐式 200、三参数写头、平铺数组写头、`appendHeader` 多值、无清理时不包装 `writeHead`、64 KiB 预算下 200 条 cookie（约 19 KiB）仍能握手、400 条 jar 分 5 轮各 ≤96 条收敛且客户端不报错——旧实现会在 303 上丢掉全部删除指令，128 条的上限也会让 `fetch` 解码失败。
 
 ## 环境
 
