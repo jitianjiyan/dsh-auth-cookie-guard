@@ -1,4 +1,4 @@
-# 启动 Cookie 守护（@local/dsh-auth-cookie-guard）
+# 启动 Cookie 守护（dsh-auth-cookie-guard）
 
 修复 DSH 桌面版「固定 profile 启动约 72 次后永久报 `desktop welcome: Web authentication failed`」的问题。
 
@@ -40,7 +40,7 @@
 
 ```yaml
 - id: auth-cookie-guard
-  name: '@local/dsh-auth-cookie-guard'
+  name: dsh-auth-cookie-guard
   config:
     maxHeaderBytes: 131072
     keep: 4
@@ -50,10 +50,11 @@
 
 ## 安装与卸载
 
-- 安装：在插件管理中作为 bundle 安装（源码目录即本仓库），工具会把它写进 profile 的 `package.json`（`dsh.profile.bundles` 与 `link:` 依赖）；本 bundle 自带的 `cordis.patch.yml` 作为独立层插入那一行，profile 自己的 `cordis.patch.yml` 不需要任何改动。不要手改 profile 文件。
+- 安装：在 DSH 插件页填入 `dsh-auth-cookie-guard` 安装（或执行 `dsh plugin add dsh-auth-cookie-guard`）。工具会把它写进 profile 的 `package.json`（`dsh.profile.bundles` 与 npm 依赖）；本 bundle 自带的 `cordis.patch.yml` 作为独立层插入那一行，profile 自己的 `cordis.patch.yml` 不需要任何改动。不要手改 profile 文件。
 - 生效方式：安装时宿主会重载组合，插件当场 apply，无需重启桌面端；之后每次启动同样自动生效。
 - 卸载：在插件管理中移除该 bundle，重启桌面端；卸载后会恢复监听器的原始头部预算（插件在 dispose 时还原）。
 - 本插件只有 Host 端，没有浏览器端资源，也没有 service / tool / event。
+- 开发时也可以直接安装本仓库源码目录（工具会以 `link:` 方式引入），发布版走 npm 包 `dsh-auth-cookie-guard`。
 
 ## 验证
 
@@ -81,6 +82,8 @@ big header 20KB:  {"status":401}            # 提升预算前这里是 431
 第一行说明请求已经进入应用层（401 是未认证的正常响应，而不是 Node 在解析层回的 431），即 `maxHeaderSize` 已抬到 64 KiB；第二行说明裁剪逻辑在真实请求上生效。宿主日志同时会打印
 `auth-cookie-guard: listener header budget 65536 bytes, keeping 4 launch cookie(s)` 与
 `auth-cookie-guard: retired N launch cookie(s), kept 4`，此后无论重启多少次都不再累积。
+
+回归测试 `npm test`（`test/handshake.test.js`）覆盖 303 对象写头（真实握手路径）、普通 200 与三参数写头，断言删除指令和握手新 cookie 在同一个响应里返回——旧实现只在握手之后的普通请求里补清理。
 
 ## 环境
 

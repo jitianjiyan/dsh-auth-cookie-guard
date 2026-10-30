@@ -1,14 +1,16 @@
 {
-  "name": "@local/dsh-auth-cookie-guard",
-  "version": "1.0.0",
-  "private": true,
+  "name": "dsh-auth-cookie-guard",
+  "version": "1.0.1",
+  "description": "Give the local listener a header budget large enough for its own launch cookies, and retire the cookies of every earlier start, so the desktop welcome handshake cannot lock a profile out after ~72 restarts.",
   "type": "module",
   "main": "index.js",
+  "scripts": {
+    "test": "node --test test/handshake.test.js"
+  },
   "engines": {
     "node": "^22.19.0 || >=24.0.0"
   },
   "packageManager": "pnpm@11.7.0",
-  "description": "Give the local listener a header budget large enough for its own launch cookies, and retire the cookies of every earlier start, so the desktop welcome handshake cannot lock a profile out after ~72 restarts.",
   "exports": {
     ".": "./index.js",
     "./locale/*.json": "./locale/*.json",
@@ -19,8 +21,26 @@
     "cordis.patch.yml",
     "locale",
     "icon.svg",
-    "README.md"
+    "README.md",
+    "LICENSE"
   ],
+  "keywords": [
+    "dsh",
+    "deepseek-harness",
+    "dsh-plugin",
+    "cookie",
+    "startup",
+    "guard"
+  ],
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/jitianjiyan/dsh-auth-cookie-guard.git"
+  },
+  "homepage": "https://github.com/jitianjiyan/dsh-auth-cookie-guard#readme",
+  "bugs": {
+    "url": "https://github.com/jitianjiyan/dsh-auth-cookie-guard/issues"
+  },
   "dsh": {
     "bundle": {
       "patch": "./cordis.patch.yml"

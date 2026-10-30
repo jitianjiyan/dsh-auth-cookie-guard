@@ -3,4 +3,4 @@
 # owns `listen`), and the row is dropped as a whole when the bundle is removed.
 - insert:
     - id: auth-cookie-guard
-      name: '@local/dsh-auth-cookie-guard'
+      name: dsh-auth-cookie-guard

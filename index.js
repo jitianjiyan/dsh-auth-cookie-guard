@@ -111,11 +111,12 @@ export function apply(ctx, config = {}) {
   const bound = cookieNameOf(protocol, boundHost(webServer))
 
   /**
-   * Delete the launch cookies this instance will never authenticate, before the
-   * response that would carry them is written.
+   * Delete the launch cookies this instance will never authenticate on the
+   * response that answers the current request.
    *
    * @param req - incoming request carrying the browser jar.
-   * @param res - response being prepared; deletions are appended, not replaced.
+   * @param res - response being prepared; deletions are merged when it writes
+   *   its headers, so an object-form `writeHead` cannot replace them.
    */
   function retire(req, res) {
     const header = req.headers.cookie
@@ -143,7 +144,7 @@ export function apply(ctx, config = {}) {
     const lines = stale
       .slice(0, MAX_RETIRE_PER_RESPONSE)
       .map((entry) => `${entry.name}=; ${EXPIRATION}`)
-    appendCookies(res, lines)
+    armCookies(res, lines)
     ctx.logger?.info?.(
       `auth-cookie-guard: retired ${String(lines.length)} launch cookie(s), kept ${String(retained.size)}`,
     )
@@ -238,25 +239,73 @@ function readClaim(value) {
 }
 
 /**
- * Add `Set-Cookie` lines without disturbing headers the route already set.
+ * Symbol key holding a response's queued `Set-Cookie` deletions.
  *
- * `appendHeader` keeps values that a later `writeHead` object does not mention;
- * older runtimes get the same effect through `getHeader`/`setHeader`.
+ * @type {symbol}
+ */
+const COOKIES = Symbol('auth-cookie-guard.cookies')
+
+/**
+ * Queue `Set-Cookie` deletions until the response commits its headers.
+ *
+ * The welcome handshake answers with `res.writeHead(303, { 'set-cookie': … })`.
+ * Node replaces every existing value of a header named in that object, so a
+ * deletion appended beforehand is silently lost. Keeping the lines here and
+ * merging them inside this response's own `writeHead` puts them on the same
+ * response for all three call shapes — object, flat array, and no headers —
+ * instead of depending on a later request to carry the cleanup.
  *
  * @param res - the response being prepared.
- * @param lines - cookie serializations to append.
+ * @param lines - cookie serializations to add.
  */
-function appendCookies(res, lines) {
-  if (typeof res.appendHeader === 'function') {
-    for (const line of lines) res.appendHeader('set-cookie', line)
-    return
+function armCookies(res, lines) {
+  if (lines.length === 0) return
+  const state = res[COOKIES] ?? (res[COOKIES] = { lines: [], armed: false })
+  state.lines.push(...lines)
+  if (state.armed) return
+  state.armed = true
+
+  const writeHead = res.writeHead
+  res.writeHead = function (statusCode, statusMessage, headers) {
+    const pending = state.lines
+    let message
+    if (typeof statusMessage === 'string') message = statusMessage
+    else headers = statusMessage
+
+    if (Array.isArray(headers)) {
+      headers = [...headers, ...pending.flatMap((line) => ['set-cookie', line])]
+    } else if (headers !== undefined && headers !== null) {
+      const copy = {}
+      let replaced = false
+      for (const key of Object.keys(headers)) {
+        if (key.toLowerCase() === 'set-cookie') {
+          copy['set-cookie'] = [...cookieValues(headers[key]), ...pending]
+          replaced = true
+        } else {
+          copy[key] = headers[key]
+        }
+      }
+      if (!replaced) copy['set-cookie'] = [...pending]
+      headers = copy
+    } else {
+      res.setHeader('set-cookie', [...cookieValues(res.getHeader('set-cookie')), ...pending])
+    }
+
+    return message === undefined
+      ? writeHead.call(res, statusCode, headers)
+      : writeHead.call(res, statusCode, message, headers)
   }
-  const existing = res.getHeader('set-cookie')
-  const merged =
-    existing === undefined
-      ? [...lines]
-      : [...(Array.isArray(existing) ? existing : [String(existing)]), ...lines]
-  res.setHeader('set-cookie', merged)
+}
+
+/**
+ * Normalize one header value to the array form `setHeader` expects.
+ *
+ * @param value - current `Set-Cookie` value, if any.
+ * @returns the value as an array.
+ */
+function cookieValues(value) {
+  if (value === undefined) return []
+  return Array.isArray(value) ? value : [value]
 }
 
 /**
