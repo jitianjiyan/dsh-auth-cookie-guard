@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "Launch Cookie Guard",
+    "description": "Keeps the local listener's header budget ahead of its accumulated launch cookies, and retires the cookies left by earlier starts so a profile cannot be locked out of the desktop welcome handshake."
+  }
+}
