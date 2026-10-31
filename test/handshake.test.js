@@ -25,14 +25,14 @@ function jar(count) {
  * @param handler - route under test.
  * @returns `{ origin, close }` for the server.
  */
-async function guarded(handler) {
+async function guarded(handler, logger = { info() {}, warn() {} }) {
   const server = createServer(handler)
   await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve))
   const origin = `http://127.0.0.1:${server.address().port}`
 
   apply({
     webServer: { server, getOrigin: () => origin },
-    logger: { info() {}, warn() {} },
+    logger,
     effect: (fn) => {
       fn()
       return () => {}
@@ -266,6 +266,58 @@ test('a 400-cookie jar drains in bounded chunks without breaking the client', as
     }
     assert.equal(rounds, 5)
     assert.equal(entries.length, 4)
+  } finally {
+    await server.close()
+  }
+})
+
+test('cookie order, not value claims, decides which cookies are kept', async () => {
+  // Payloads claim the opposite order (index 0 is "newest"). A guard that
+  // decoded values would keep 0..3; ranking by header position must keep the
+  // tail, which is how browsers emit their jar.
+  const server = await guarded((req, res) => {
+    res.writeHead(303, { location: './', 'set-cookie': 'dsh-auth-new=1; Path=/' })
+    res.end()
+  })
+  try {
+    const entries = Array.from({ length: 100 }, (_, index) => {
+      const name = 'dsh-auth-' + createHash('sha256').update(`order-${index}`).digest('base64url')
+      const payload = Buffer.from(JSON.stringify({ issuedAt: 1_000_000 - index })).toString('base64url')
+      return { name, cookie: `${name}=v1.${payload}.signature` }
+    })
+    const response = await fetch(`${server.origin}/?token=launch-token`, {
+      headers: { cookie: entries.map(({ cookie }) => cookie).join('; ') },
+      redirect: 'manual',
+    })
+    const deletions = response.headers.getSetCookie().filter((line) => line.includes('Max-Age=0'))
+    assert.equal(deletions.length, 96)
+    for (const { name } of entries.slice(0, 96)) {
+      assert.ok(deletions.some((line) => line.startsWith(`${name}=`)), `${name} should be retired`)
+    }
+    for (const { name } of entries.slice(96)) {
+      assert.ok(!deletions.some((line) => line.startsWith(`${name}=`)), `${name} should be kept`)
+    }
+  } finally {
+    await server.close()
+  }
+})
+
+test('cookie names and values never reach the logger', async () => {
+  const messages = []
+  const server = await guarded(
+    (req, res) => {
+      res.writeHead(303, { location: './', 'set-cookie': 'dsh-auth-new=1; Path=/' })
+      res.end()
+    },
+    { info: (message) => messages.push(message), warn: (message) => messages.push(message) },
+  )
+  try {
+    await handshake(server.origin)
+    assert.ok(messages.length > 0)
+    for (const message of messages) {
+      assert.ok(!message.includes('dsh-auth-'), `cookie name leaked: ${message}`)
+      assert.ok(!message.includes('v1.'), `cookie value leaked: ${message}`)
+    }
   } finally {
     await server.close()
   }

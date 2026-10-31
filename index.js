@@ -27,11 +27,15 @@
  *    live server takes effect immediately — including for the handshake that
  *    would otherwise be answered with 431.
  * 2. Retires stale launch cookies on every request. Minted names are
- *    `dsh-auth-<43 base64url characters>` and their payload carries
- *    `issuedAt`, which is enough to rank them without the signing secret.
- *    Everything older than the newest `keep` is deleted in the browser jar
- *    with `Max-Age=0`, so the jar shrinks at the first successful handshake
- *    instead of growing without bound.
+ *    `dsh-auth-<43 base64url characters>`; browsers list their jar oldest
+ *    first (RFC 6265 section 5.4) and every launch cookie uses `Path=/`, so
+ *    the tail of the header is the newest set. Everything except the newest
+ *    `keep` is deleted in the browser jar with `Max-Age=0`, so the jar shrinks
+ *    at the first successful handshake instead of growing without bound.
+ *
+ * It never decodes a cookie value: only the name is needed to rank the jar,
+ * and the value is the signed session payload (`authority`, `issuedAt`,
+ * `expiresAt`). The guard therefore cannot read, log, or act on login state.
  *
  * Neither half is sufficient alone, which is why both are installed: raising the
  * budget only postpones the wall (~350 starts instead of ~72), and pruning alone
@@ -40,12 +44,12 @@
  *
  * ## What it deliberately does not do
  *
- * It never renames, re-signs, or rewrites a cookie it keeps, and it never
- * touches a cookie whose name is not the exact minted shape — a future format
- * change degrades to "budget raised, nothing retired" rather than to a broken
- * session. It also keeps the cookie belonging to the current authority even
- * when that cookie is older than `keep`, so the running instance cannot delete
- * the very cookie it is authenticating with.
+ * It never decodes a cookie value, renames, re-signs, or rewrites a cookie it
+ * keeps, and it never touches a cookie whose name is not the exact minted
+ * shape — a future format change degrades to "budget raised, nothing retired"
+ * rather than to a broken session. It also keeps the cookie belonging to the
+ * current authority even when that cookie is not among the newest `keep`, so
+ * the running instance cannot delete the very cookie it is authenticating with.
  */
 
 import { createHash } from 'node:crypto'
@@ -131,28 +135,28 @@ export function apply(ctx, config = {}) {
     const header = req.headers.cookie
     if (typeof header !== 'string' || !header.includes(PREFIX)) return
 
-    const entries = []
+    const names = []
     for (const segment of header.split(';')) {
       const at = segment.indexOf('=')
       if (at === -1) continue
       const name = segment.slice(0, at).trim()
-      if (!MINTED.test(name)) continue
-      const claim = readClaim(segment.slice(at + 1).trim())
-      entries.push({ name, issuedAt: claim?.issuedAt ?? 0 })
+      if (MINTED.test(name)) names.push(name)
     }
-    if (entries.length === 0) return
+    if (names.length === 0) return
 
-    const ranked = [...entries].sort((left, right) => right.issuedAt - left.issuedAt)
-    const retained = new Set(ranked.slice(0, keep).map((entry) => entry.name))
+    // Browsers emit the jar oldest first (RFC 6265 section 5.4), so the tail
+    // holds the newest launches; the current authority is kept by name even
+    // when it is not in that tail.
+    const retained = new Set(names.slice(-keep))
     const current = cookieNameOf(protocol, req.headers.host) ?? bound
     if (current !== undefined) retained.add(current)
 
-    const stale = entries.filter((entry) => !retained.has(entry.name))
+    const stale = [...new Set(names)].filter((name) => !retained.has(name))
     if (stale.length === 0) return
 
     const lines = stale
       .slice(0, MAX_RETIRE_PER_RESPONSE)
-      .map((entry) => `${entry.name}=; ${EXPIRATION}`)
+      .map((name) => `${name}=; ${EXPIRATION}`)
     armCookies(res, lines)
     ctx.logger?.info?.(
       `auth-cookie-guard: retired ${String(lines.length)} launch cookie(s), kept ${String(retained.size)}`,
@@ -222,28 +226,6 @@ function originProtocol(webServer) {
     return new URL(webServer.getOrigin()).protocol
   } catch {
     return 'http:'
-  }
-}
-
-/**
- * Read the unverified payload of a minted cookie just far enough to rank it.
- *
- * The signature is not checked on purpose: this value is only used to decide
- * which of the caller's own cookies to drop, never to authenticate anything.
- *
- * @param value - the cookie value.
- * @returns `{ issuedAt }`, or `undefined` when the value is not a claim.
- */
-function readClaim(value) {
-  const parts = value.split('.')
-  if (parts.length !== 3 || (parts[0] !== 'v1' && parts[0] !== 'v2')) return undefined
-  try {
-    const payload = JSON.parse(Buffer.from(parts[1], 'base64url').toString('utf8'))
-    if (payload === null || typeof payload !== 'object') return undefined
-    const issuedAt = typeof payload.issuedAt === 'number' ? payload.issuedAt : 0
-    return { issuedAt }
-  } catch {
-    return undefined
   }
 }
 
