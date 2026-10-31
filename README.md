@@ -43,32 +43,6 @@
 - **头部预算的副作用**：默认把监听器的 `maxHeaderSize` 提到 64 KiB。默认回环监听下这只影响本机；如果把 DSH 绑到回环之外，远端请求可以多占每连接头部内存——对外暴露时应加反向代理/访问控制，或把 `maxHeaderBytes` 调低。
 - **同 host 多实例**：浏览器 cookie 按 host 共享，插件会退休「最新 `keep` 条 + 当前端口」之外的启动 cookie；同一份 profile 同时跑多个实例时，较旧实例的登录可能被清理，需要重新走一次欢迎页握手。当前实例自己的 cookie 始终保留。
 
-## 排障：历史加载失败（`SessionFormatError`）
-
-如果安装/重启后看到：
-
-```
-历史加载失败: stored session "session-…" is corrupt: stored log is corrupt:
-SessionFormatError: format v4 message requires a producer-owned source kind
-(raw log: …\session.v4.jsonl.zstd) (gateway/internal)
-```
-
-这不是本插件造成的。本插件只处理 HTTP 响应头（提升头部预算、追加删除头），没有会话 API、文件读写或模型注入；它不会写 `session.v*.jsonl.zstd`。出现这条错误说明**磁盘上已存的某条消息**不满足 DSH 会话格式 V4 的消息准入：`source.kind` 缺失、为空，或仍是旧式 `{ kind: "plugin", plugin: "…" }` 包装。这种消息通常由旧版 DSH 或仍在使用已退役 `agent.inject()` 写法的插件写入；换插件、重启都不会改写它。
-
-诊断（只读，不会修改任何文件）：
-
-```sh
-node scripts/diagnose-session.mjs "%USERPROFILE%\.dsh\sessions"
-```
-
-脚本会解压日志的每个 zstd 帧，打印出坏消息所在的文件、事件、`source` 以及旧包装里的 `plugin` 名。修复方式：
-
-1. 先备份整个会话目录（`~/.dsh/sessions/<workspace>/<session-id>/`）。
-2. 在 DSH 里删除该会话，或把该目录移出 `sessions/`；其余会话不受影响。
-3. 升级写入该消息的插件（它需要声明自己的 `MessageSourceMap` kind，而不是 `{kind:"plugin"}`），或升级 DSH。
-
-不要手工编辑或重压 `session.v*.jsonl.zstd`，除非你明确知道该条消息的正确来源。
-
 ## 配置
 
 在 profile 的 patch 层给这一行加 `config` 即可（`maxHeaderBytes` 会被夹到 16 KiB–1 MiB，`keep` 到 1–64）：
@@ -118,7 +92,7 @@ big header 20KB:  {"status":401}            # 提升预算前这里是 431
 `auth-cookie-guard: listener header budget 65536 bytes, keeping 4 launch cookie(s)` 与
 `auth-cookie-guard: retired N launch cookie(s), kept 4`，此后无论重启多少次都不再累积。
 
-回归测试 `npm test`（14 例握手 + 3 例诊断脚本）覆盖：303 对象写头（真实握手路径）、隐式 200、三参数写头、平铺数组写头、`appendHeader` 多值、无清理时不包装 `writeHead`、64 KiB 预算下 200 条 cookie（约 19 KiB）仍能握手、400 条 jar 分 5 轮各 ≤96 条收敛且客户端不报错、按顺序而非 cookie 值排序、名字和值不进日志，以及诊断脚本对合法/旧包装/缺 `kind` 会话的判定——旧实现会在 303 上丢掉全部删除指令，128 条的上限也会让 `fetch` 解码失败。
+回归测试 `npm test`（14 例）覆盖：303 对象写头（真实握手路径）、隐式 200、三参数写头、平铺数组写头、`appendHeader` 多值、无清理时不包装 `writeHead`、64 KiB 预算下 200 条 cookie（约 19 KiB）仍能握手、400 条 jar 分 5 轮各 ≤96 条收敛且客户端不报错、按顺序而非 cookie 值排序、名字和值不进日志——旧实现会在 303 上丢掉全部删除指令，128 条的上限也会让 `fetch` 解码失败。
 
 ## 环境
 
