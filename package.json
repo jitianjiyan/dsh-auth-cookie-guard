@@ -1,11 +1,11 @@
 {
   "name": "dsh-auth-cookie-guard",
-  "version": "1.0.4",
+  "version": "1.0.5",
   "description": "Give the local listener a header budget large enough for its own launch cookies, and retire the cookies of every earlier start, so the desktop welcome handshake cannot lock a profile out after ~72 restarts.",
   "type": "module",
   "main": "index.js",
   "scripts": {
-    "test": "node --test test/handshake.test.js"
+    "test": "node --test"
   },
   "engines": {
     "node": "^22.19.0 || >=24.0.0"
@@ -21,6 +21,7 @@
     "cordis.patch.yml",
     "locale",
     "icon.svg",
+    "scripts",
     "README.md",
     "LICENSE"
   ],
