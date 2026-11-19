@@ -1,6 +1,8 @@
 # 启动 Cookie 守护（dsh-auth-cookie-guard）
 
-修复 DSH 桌面版「固定 profile 启动约 72 次后永久报 `desktop welcome: Web authentication failed`」的问题。
+修复 DSH 桌面版「固定 profile 连续启动约 71 次后，第 72 次握手永久报 `desktop welcome: Web authentication failed`」的问题。
+
+**兼容性**：DSH 0.2.2-rc2 起宿主已内置修复本问题（上游说明），已修复版本不再需要它；插件保持向后兼容，支持所有仍使用 `dsh-auth-<43 位 base64url>` 命名规则的 DSH 版本（含旧版与已修复版本），命名规则变化时退化为「只提升预算、不再清理」。在已修复版本上，若 jar 里还有旧版遗留的 cookie 会顺手清理，没有可删项时不碰 `writeHead`；预算只抬高，不会把宿主已有的更大值降回来。
 
 ## 症状
 
@@ -10,9 +12,9 @@
 ## 根因
 
 1. Host 每次启动都绑定随机端口；浏览器会话 cookie 按授权方命名：
-   `dsh-auth-<base64url(sha256(host:port))>`（`dsh-client-connection/lib/index.js:277`、`:335-337`）。
+   `dsh-auth-<base64url(sha256(host:port))>`（`dsh-client-connection/lib/index.js:335-337` 的 `cookieName`）。
 2. 浏览器按**域名**存 cookie，端口不进键。于是每启动一次，`127.0.0.1` 上就多一条约 173 字符、`Max-Age` 30 天的持久 cookie，且没有任何代码删除它们。
-3. Host 建监听器时没有覆盖头部预算——`createServer(listener)`（`dsh-host-webserver/lib/index.js:412`）——因此沿用 Node 默认的 `maxHeaderSize = 16384` 字节。
+3. Host 建监听器时没有覆盖头部预算——`createServer(listener)`（`dsh-host-webserver/lib/index.js:490`）——因此沿用 Node 默认的 `maxHeaderSize = 16384` 字节。
 4. 第 71 条累积后 `Cookie` 头约 16184 字节，本轮再下发 1 条即约 16411 字节，超过 16384，Node 直接返回 `431`；客户端把它当成认证失败。此后每次启动都超过上限，而 431 的请求根本到不了应用层，也就没有任何机会清理——故障是纯累积型且不可自愈的。
 
 ## 插件做了什么
@@ -21,7 +23,7 @@
 
 | 层 | 行为 | 默认值 |
 | --- | --- | --- |
-| 头部预算 | 在 `webServer` 服务就绪后把 `server.maxHeaderSize` 提升到 64 KiB | `maxHeaderBytes: 65536` |
+| 头部预算 | 在 `webServer` 服务就绪后把 `server.maxHeaderSize` 抬到至少 64 KiB（宿主已设更大值时保持原值） | `maxHeaderBytes: 65536` |
 | 退休旧 cookie | 每个请求只读取 `Cookie` 头里的名字（必须是 `dsh-auth-<43 位 base64url>`）；按浏览器发送顺序（旧→新）保留最后 `keep` 条 + 当前端口那一条，其余用 `Max-Age=0; Path=/` 从浏览器 jar 删除（每个响应最多 96 条，约 12 KiB） | `keep: 4` |
 
 几点设计取舍：

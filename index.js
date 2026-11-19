@@ -66,6 +66,9 @@ const PREFIX = 'dsh-auth-'
 /** Exactly the minted shape: the prefix plus a sha256 digest in base64url. */
 const MINTED = /^dsh-auth-[A-Za-z0-9_-]{43}$/
 
+/** Length implied by `MINTED`; checked first so the regex only sees candidates. */
+const MINTED_LENGTH = PREFIX.length + 43
+
 /** Defaults, overridable from the profile patch row. */
 const DEFAULTS = {
   maxHeaderBytes: 64 * 1024,
@@ -94,6 +97,13 @@ const EXPIRATION = 'Max-Age=0; Path=/; Expires=Thu, 01 Jan 1970 00:00:00 GMT'
 const MAX_RETIRE_PER_RESPONSE = 96
 
 /**
+ * Symbol key holding a response's queued `Set-Cookie` deletions.
+ *
+ * @type {symbol}
+ */
+const COOKIES = Symbol('auth-cookie-guard.cookies')
+
+/**
  * Guard the local listener.
  *
  * @param ctx - plugin context; `webServer` is the live service.
@@ -114,14 +124,27 @@ export function apply(ctx, config = {}) {
   // Node reads this per connection, so the value applies to connections that
   // have not been accepted yet — the handshake we are trying to rescue.
   const previous = server.maxHeaderSize
-  server.maxHeaderSize = maxHeaderBytes
+  // Only raise: a Host that already allows a larger budget keeps it.
+  const applied = Math.max(previous ?? 0, maxHeaderBytes)
+  server.maxHeaderSize = applied
 
-  // The cookie this process just minted is the newest one, but keeping it by
-  // name also covers a clock that moved backwards between two starts. The name
-  // is resolved per request exactly as the Host resolves it, so a page opened on
-  // `localhost` instead of `127.0.0.1` still protects the cookie it is using.
-  const protocol = originProtocol(webServer)
-  const bound = cookieNameOf(protocol, boundHost(webServer))
+  // Read the listener's origin once: the protocol names request cookies and
+  // the bound authority is the fallback when a request carries no Host.
+  const { protocol, bound } = listenerIdentity(webServer)
+
+  // Requests normally repeat one authority, so resolve its digest once per
+  // change instead of once per request. The name is resolved per request
+  // exactly as the Host resolves it, so a page opened on `localhost` instead of
+  // `127.0.0.1` still protects the cookie it is using.
+  let lastHost
+  let lastName
+  function currentCookie(host) {
+    if (host !== lastHost) {
+      lastHost = host
+      lastName = cookieNameOf(protocol, host)
+    }
+    return lastName
+  }
 
   /**
    * Delete the launch cookies this instance will never authenticate on the
@@ -135,28 +158,50 @@ export function apply(ctx, config = {}) {
     const header = req.headers.cookie
     if (typeof header !== 'string' || !header.includes(PREFIX)) return
 
-    const names = []
-    for (const segment of header.split(';')) {
-      const at = segment.indexOf('=')
-      if (at === -1) continue
-      const name = segment.slice(0, at).trim()
-      if (MINTED.test(name)) names.push(name)
-    }
-    if (names.length === 0) return
+    // One pass over the header: `seen` holds each minted name once in browser
+    // order, `newest` the raw tail, which is what "newest keep" means.
+    const seen = new Set()
+    const newest = []
+    let start = 0
+    do {
+      let stop = header.indexOf(';', start)
+      if (stop === -1) stop = header.length
+      // Scan this segment only: searching from `start` to the end of the header
+      // for every empty segment would make a `;`-heavy header quadratic.
+      let at = -1
+      for (let index = start; index < stop; index += 1) {
+        if (header.charCodeAt(index) === 61) {
+          at = index
+          break
+        }
+      }
+      if (at !== -1) {
+        const name = header.slice(start, at).trim()
+        if (name.length === MINTED_LENGTH && MINTED.test(name)) {
+          seen.add(name)
+          newest.push(name)
+          if (newest.length > keep) newest.shift()
+        }
+      }
+      start = stop + 1
+    } while (start < header.length)
+    if (seen.size === 0) return
 
     // Browsers emit the jar oldest first (RFC 6265 section 5.4), so the tail
     // holds the newest launches; the current authority is kept by name even
     // when it is not in that tail.
-    const retained = new Set(names.slice(-keep))
-    const current = cookieNameOf(protocol, req.headers.host) ?? bound
+    const retained = new Set(newest)
+    const current = currentCookie(req.headers.host) ?? bound
     if (current !== undefined) retained.add(current)
 
-    const stale = [...new Set(names)].filter((name) => !retained.has(name))
-    if (stale.length === 0) return
+    const lines = []
+    for (const name of seen) {
+      if (retained.has(name)) continue
+      lines.push(`${name}=; ${EXPIRATION}`)
+      if (lines.length === MAX_RETIRE_PER_RESPONSE) break
+    }
+    if (lines.length === 0) return
 
-    const lines = stale
-      .slice(0, MAX_RETIRE_PER_RESPONSE)
-      .map((name) => `${name}=; ${EXPIRATION}`)
     armCookies(res, lines)
     ctx.logger?.info?.(
       `auth-cookie-guard: retired ${String(lines.length)} launch cookie(s), kept ${String(retained.size)}`,
@@ -167,13 +212,34 @@ export function apply(ctx, config = {}) {
     server.prependListener('request', retire)
     return () => {
       server.removeListener('request', retire)
-      if (server.maxHeaderSize === maxHeaderBytes) server.maxHeaderSize = previous
+      if (server.maxHeaderSize === applied) server.maxHeaderSize = previous
     }
   })
 
   ctx.logger?.info?.(
-    `auth-cookie-guard: listener header budget ${String(maxHeaderBytes)} bytes, keeping ${String(keep)} launch cookie(s)`,
+    `auth-cookie-guard: listener header budget ${String(applied)} bytes, keeping ${String(keep)} launch cookie(s)`,
   )
+}
+
+/**
+ * Read the listener's protocol and the cookie name of its bound authority.
+ *
+ * @param webServer - the live service.
+ * @returns `{ protocol, bound }`; plain HTTP and no fallback name when the
+ *   origin is unreadable.
+ */
+function listenerIdentity(webServer) {
+  try {
+    const url = new URL(webServer.getOrigin())
+    if (url.host === '') return { protocol: url.protocol, bound: undefined }
+    const authority = url.protocol === 'https:' ? url.origin : url.host
+    return {
+      protocol: url.protocol,
+      bound: PREFIX + createHash('sha256').update(authority).digest('base64url'),
+    }
+  } catch {
+    return { protocol: 'http:', bound: undefined }
+  }
 }
 
 /**
@@ -198,101 +264,62 @@ function cookieNameOf(protocol, host) {
 }
 
 /**
- * Read the authority the listener is bound to, as a fallback for requests that
- * carry no Host header.
- *
- * @param webServer - the live service, used only for its bound origin.
- * @returns `host:port`, or `undefined` when the origin is unreadable.
- */
-function boundHost(webServer) {
-  try {
-    return new URL(webServer.getOrigin()).host
-  } catch {
-    return undefined
-  }
-}
-
-/**
- * Read the protocol the listener actually serves, from its own origin.
- *
- * The cookie name keeps the bare authority for plain HTTP and the full origin
- * for TLS, so the protocol has to match the Host's view rather than a guess.
- *
- * @param webServer - the live service.
- * @returns `'http:'` or `'https:'`; plain HTTP when the origin is unreadable.
- */
-function originProtocol(webServer) {
-  try {
-    return new URL(webServer.getOrigin()).protocol
-  } catch {
-    return 'http:'
-  }
-}
-
-/**
- * Symbol key holding a response's queued `Set-Cookie` deletions.
- *
- * @type {symbol}
- */
-const COOKIES = Symbol('auth-cookie-guard.cookies')
-
-/**
  * Queue `Set-Cookie` deletions until the response commits its headers.
  *
  * The welcome handshake answers with `res.writeHead(303, { 'set-cookie': … })`.
  * Node replaces every existing value of a header named in that object, so a
  * deletion appended beforehand is silently lost. Keeping the lines here and
  * merging them inside this response's own `writeHead` puts them on the same
- * response for all three call shapes — object, flat array, and no headers —
- * instead of depending on a later request to carry the cleanup.
+ * response for all call shapes — object, flat array, and no headers — instead
+ * of depending on a later request to carry the cleanup.
  *
  * @param res - the response being prepared.
  * @param lines - cookie serializations to add.
  */
 function armCookies(res, lines) {
-  if (lines.length === 0) return
   const state = res[COOKIES] ?? (res[COOKIES] = { lines: [], armed: false })
-  state.lines.push(...lines)
+  for (const line of lines) state.lines.push(line)
   if (state.armed) return
   state.armed = true
 
   const writeHead = res.writeHead
   res.writeHead = function (statusCode, statusMessage, headers) {
-    const pending = state.lines
     let message
     if (typeof statusMessage === 'string') message = statusMessage
     else headers = statusMessage
 
+    const pending = state.lines
     if (Array.isArray(headers)) {
-      headers = [...headers, ...pending.flatMap((line) => ['set-cookie', line])]
+      const merged = headers.slice()
+      for (const line of pending) merged.push('set-cookie', line)
+      headers = merged
     } else if (headers !== undefined && headers !== null) {
       const copy = {}
       const cookies = []
       for (const key of Object.keys(headers)) {
-        if (key.toLowerCase() === 'set-cookie') cookies.push(...cookieValues(headers[key]))
-        else copy[key] = headers[key]
+        const value = headers[key]
+        if (key.toLowerCase() !== 'set-cookie') copy[key] = value
+        else if (Array.isArray(value)) for (const item of value) cookies.push(item)
+        else if (value !== undefined) cookies.push(value)
       }
-      copy['set-cookie'] = [...cookies, ...pending]
+      for (const line of pending) cookies.push(line)
+      copy['set-cookie'] = cookies
       headers = copy
     } else {
-      res.setHeader('set-cookie', [...cookieValues(res.getHeader('set-cookie')), ...pending])
+      const existing = res.getHeader('set-cookie')
+      const cookies = existing === undefined
+        ? []
+        : Array.isArray(existing)
+          ? existing.slice()
+          : [existing]
+      for (const line of pending) cookies.push(line)
+      res.setHeader('set-cookie', cookies)
     }
 
     return message === undefined
       ? writeHead.call(res, statusCode, headers)
       : writeHead.call(res, statusCode, message, headers)
   }
-}
-
-/**
- * Normalize one header value to the array form `setHeader` expects.
- *
- * @param value - current `Set-Cookie` value, if any.
- * @returns the value as an array.
- */
-function cookieValues(value) {
-  if (value === undefined) return []
-  return Array.isArray(value) ? value : [value]
 }
 
 /**

@@ -25,7 +25,7 @@ function jar(count) {
  * @param handler - route under test.
  * @returns `{ origin, close }` for the server.
  */
-async function guarded(handler, logger = { info() {}, warn() {} }) {
+async function guarded(handler, logger = { info() {}, warn() {} }, config = {}) {
   const server = createServer(handler)
   await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve))
   const origin = `http://127.0.0.1:${server.address().port}`
@@ -37,7 +37,7 @@ async function guarded(handler, logger = { info() {}, warn() {} }) {
       fn()
       return () => {}
     },
-  })
+  }, config)
 
   return {
     origin,
@@ -321,4 +321,58 @@ test('cookie names and values never reach the logger', async () => {
   } finally {
     await server.close()
   }
+})
+
+test('duplicate cookie names are retired once and the newest survives', async () => {
+  const first = mintedCookie(0).name
+  const second = mintedCookie(1).name
+  const server = await guarded(
+    (req, res) => {
+      res.writeHead(200, { 'content-type': 'text/plain' })
+      res.end('ok')
+    },
+    undefined,
+    { keep: 1 },
+  )
+  try {
+    const response = await fetch(`${server.origin}/`, {
+      headers: { cookie: `junk; ; ${first}=old; ${first}=new; =value; ${second}=newest` },
+    })
+    const lines = response.headers.getSetCookie()
+    assert.equal(lines.filter((line) => line.startsWith(`${first}=`)).length, 1)
+    assert.ok(!lines.some((line) => line.startsWith(`${second}=`)))
+  } finally {
+    await server.close()
+  }
+})
+
+test('dispose restores the previous budget and never lowers a larger one', () => {
+  const listener = () => createServer((req, res) => res.end())
+
+  const plain = listener()
+  let restore
+  apply({
+    webServer: { server: plain, getOrigin: () => 'http://127.0.0.1:1' },
+    logger: { info() {}, warn() {} },
+    effect: (fn) => {
+      restore = fn()
+    },
+  }, { maxHeaderBytes: 32768 })
+  assert.equal(plain.maxHeaderSize, 32768)
+  restore()
+  assert.equal(plain.maxHeaderSize, undefined)
+
+  const roomy = listener()
+  roomy.maxHeaderSize = 200000
+  let undo
+  apply({
+    webServer: { server: roomy, getOrigin: () => 'http://127.0.0.1:1' },
+    logger: { info() {}, warn() {} },
+    effect: (fn) => {
+      undo = fn()
+    },
+  }, { maxHeaderBytes: 65536 })
+  assert.equal(roomy.maxHeaderSize, 200000)
+  undo()
+  assert.equal(roomy.maxHeaderSize, 200000)
 })
